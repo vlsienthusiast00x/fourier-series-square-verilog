@@ -16,7 +16,6 @@ module tb_fourier_sq;
     initial clk = 0;
     always #5 clk = ~clk;  // 100 MHz
 
-    integer f;
     integer cycles;
     initial begin
         // Dumpfile setup for GTKWave or other viewers
@@ -25,17 +24,7 @@ module tb_fourier_sq;
 
         rst = 1;
         #50 rst = 0;
-
-        // Open after reset deassertion
-        f = $fopen("verilog_wave.txt", "w");
-
-        // Capture a good window (e.g., 4000 samples)
-        for (cycles = 0; cycles < 4000; cycles = cycles + 1) begin
-            @(posedge clk);
-            $fwrite(f, "%0d\n", wave_out);
-        end
-
-        $fclose(f);
         $finish;
     end
+
 endmodule
