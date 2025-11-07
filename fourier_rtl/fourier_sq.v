@@ -23,7 +23,7 @@ module square_wave_fourier #(
     // === Sine LUT (bipolar −256..+255) ===
     reg signed [8:0] sine_lut [0:LUT_SIZE-1];
     initial begin
-        $readmemh("sine_lut_9bit.hex", sine_lut);  // must be regenerated with 4096 entries
+        $readmemh("sine_lut.hex", sine_lut);  // must be regenerated with 4096 entries
     end
 
     // === Harmonic Summation ===
@@ -71,6 +71,7 @@ module square_wave_fourier #(
         else
             wave_out <= final_wave;
     end
+
 
 
 endmodule  
