@@ -1,7 +1,7 @@
 module square_wave_fourier #(
     parameter PHASE_WIDTH   = 16,
     parameter PHASE_STEP    = 256,   // adjust for sampling resolution
-    parameter MAX_HARMONICS = 1,     // odd harmonics: 1,3,5,...
+    parameter MAX_HARMONICS = 1,    // odd harmonics: 1,3,5,...
     parameter LUT_BITS      = 12,    // 4096 entries
     parameter LUT_SIZE      = (1 << LUT_BITS),
     parameter DEBUG         = 0      // set to 1 to enable $display
@@ -23,7 +23,7 @@ module square_wave_fourier #(
     // === Sine LUT (bipolar −256..+255) ===
     reg signed [8:0] sine_lut [0:LUT_SIZE-1];
     initial begin
-        $readmemh("sine_lut.hex", sine_lut);  // must be regenerated with 4096 entries
+        $readmemh("sine_lut.hex", sine_lut);  
     end
 
     // === Harmonic Summation ===
@@ -65,13 +65,23 @@ module square_wave_fourier #(
     assign final_wave = (recentered < 0)   ? 8'd0   :
                         (recentered > 255) ? 8'd255 : recentered[7:0];
 
+    // === Gray Encoding ===
+    wire [7:0] gray;
+    assign gray[7] = final_wave[7];
+    assign gray[6] = final_wave[7] ^ final_wave[6];
+    assign gray[5] = final_wave[6] ^ final_wave[5];
+    assign gray[4] = final_wave[5] ^ final_wave[4];
+    assign gray[3] = final_wave[4] ^ final_wave[3];
+    assign gray[2] = final_wave[3] ^ final_wave[2];
+    assign gray[1] = final_wave[2] ^ final_wave[1];
+    assign gray[0] = final_wave[1] ^ final_wave[0];
+
+    // === Output Register ===
     always @(posedge clk or posedge rst) begin
         if (rst)
             wave_out <= 8'd128;
         else
-            wave_out <= final_wave;
+            wave_out <= gray;   // drive pins with Gray-coded value
     end
 
-
-
-endmodule  
+endmodule

@@ -5,14 +5,29 @@ from scipy.signal import argrelextrema
 # Zoom parameters
 X_ZOOM = 500
 Y_MARGIN = 5
+SKIP_CYCLES = 20  # number of startup samples to ignore
 
-# Load Verilog output as unsigned 8-bit
+# === Gray to Binary decoding ===
+def gray_to_bin(g):
+    b = 0
+    while g:
+        b ^= g
+        g >>= 1
+    return b
+
+# Load Verilog output as unsigned 8-bit Gray-coded values
 with open("verilog_wave.txt") as f:
-    raw_data = [int(line.strip()) for line in f]
-raw = np.array(raw_data, dtype=np.uint8)
+    raw_gray = [int(line.strip()) for line in f if line.strip().isdigit()]
+gray = np.array(raw_gray, dtype=np.uint8)
+
+# Decode Gray to binary
+binary = np.array([gray_to_bin(v) for v in gray], dtype=np.uint8)
 
 # Explicit bipolar conversion: 0–255 → −128..+127
-verilog_wave = raw.astype(np.int16) - 128
+verilog_wave_full = binary.astype(np.int16) - 128
+
+# Skip startup transients
+verilog_wave = verilog_wave_full[SKIP_CYCLES:]
 cycles = np.arange(len(verilog_wave))
 
 # Diagnostic print
@@ -22,7 +37,6 @@ print("Min:", verilog_wave.min(), "Max:", verilog_wave.max())
 plt.style.use("seaborn-v0_8-dark")
 fig, ax = plt.subplots(figsize=(10, 4))
 ax.plot(cycles, verilog_wave, color="red", linewidth=2, label="Verilog Output")
-
 
 # Highlight peaks and troughs
 max_idx = argrelextrema(verilog_wave, np.greater)[0]
@@ -37,7 +51,7 @@ ymin, ymax = verilog_wave.min(), verilog_wave.max()
 ax.set_ylim(int(ymin) - Y_MARGIN, int(ymax) + Y_MARGIN)
 
 # Labels and grid
-ax.set_title("Verilog Waveform (Bipolar)")
+ax.set_title("Verilog Waveform (Bipolar, Gray Decoded)")
 ax.set_xlabel("Cycle")
 ax.set_ylabel("Amplitude")
 ax.legend()
@@ -45,5 +59,5 @@ ax.grid(True, linestyle=":", alpha=0.5)
 
 # Save and show
 plt.tight_layout()
-plt.savefig("verilog_waveform_updated.png", dpi=150)
+plt.savefig("verilog_waveform_gray_decoded.png", dpi=150)
 plt.show()
