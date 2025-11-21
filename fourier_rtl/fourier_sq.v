@@ -1,10 +1,10 @@
 module square_wave_fourier #(
     parameter PHASE_WIDTH   = 16,
     parameter PHASE_STEP    = 256,   // adjust for sampling resolution
-    parameter MAX_HARMONICS = 1,    // odd harmonics: 1,3,5,...
+    parameter MAX_HARMONICS = 3,     // odd harmonics: 1,3,5,...
     parameter LUT_BITS      = 12,    // 4096 entries
     parameter LUT_SIZE      = (1 << LUT_BITS),
-    parameter DEBUG         = 0      // set to 1 to enable $display
+    parameter DEBUG         = 0
 )(
     input  wire clk,
     input  wire rst,
@@ -23,42 +23,51 @@ module square_wave_fourier #(
     // === Sine LUT (bipolar −256..+255) ===
     reg signed [8:0] sine_lut [0:LUT_SIZE-1];
     initial begin
-        $readmemh("sine_lut.hex", sine_lut);  
+        $readmemh("sine_lut.hex", sine_lut);
     end
 
     // === Harmonic Summation ===
-    reg signed [47:0] sum_all;
+    reg signed [31:0] sum_all;
     integer i;
     integer n;
 
-    reg [31:0] phase_wide;
     reg [PHASE_WIDTH-1:0] phase_n;
     reg signed [8:0] sine_n;
-    reg signed [31:0] scaled_n;
+    reg signed [15:0] scaled_n;
 
     always @(*) begin
         sum_all = 0;
         for (i = 0; i < MAX_HARMONICS; i = i + 1) begin
-            n = 2 * i + 1;
+            n = 2*i + 1;
 
-            phase_wide = phase * n;
-            phase_n    = phase_wide[PHASE_WIDTH-1:0];
+            // Instead of phase * n (DSP), use repeated add for small n
+            case (n)
+                1: phase_n = phase;
+                3: phase_n = phase + phase + phase;
+                5: phase_n = (phase<<2) + phase;   // 4*phase + phase
+                7: phase_n = (phase<<3) - phase;   // 8*phase - phase
+                default: phase_n = phase * n;      // fallback (may use DSP)
+            endcase
 
-            sine_n     = sine_lut[phase_n[PHASE_WIDTH-1 -: LUT_BITS]];
+            sine_n = sine_lut[phase_n[PHASE_WIDTH-1 -: LUT_BITS]];
 
-            // fractional scaling with rounding
-            scaled_n   = (sine_n * 1024 + (n>>1)) / n;
-            scaled_n   = scaled_n >>> 10;
+            // Replace division by n with precomputed reciprocal constants
+            // Example: scale by (4/pi)*(1/n) approximated as shift-add
+            case (n)
+                1: scaled_n = sine_n;                        // *1
+                3: scaled_n = (sine_n>>>2) + (sine_n>>>4);   // ~1/3 approx
+                5: scaled_n = (sine_n>>>3) + (sine_n>>>5);   // ~1/5 approx
+                7: scaled_n = (sine_n>>>3) - (sine_n>>>6);   // ~1/7 approx
+                default: scaled_n = sine_n / n;              // fallback
+            endcase
 
-            sum_all    = sum_all + scaled_n;
+            sum_all = sum_all + scaled_n;
         end
     end
 
     // === Output Normalization ===
-    // Softer scaling to avoid crest clipping
-    wire signed [47:0] scaled_sum = (sum_all * 100) / 638; // ~1.065
-    // Midpoint shift with extra headroom
-    wire signed [47:0] recentered = scaled_sum + 48'sd120;
+    wire signed [31:0] scaled_sum = (sum_all * 100) >>> 9; // replace /638 with shift
+    wire signed [31:0] recentered = scaled_sum + 32'sd120;
 
     // Saturating clip to 8-bit unsigned output
     wire [7:0] final_wave;
@@ -81,7 +90,7 @@ module square_wave_fourier #(
         if (rst)
             wave_out <= 8'd128;
         else
-            wave_out <= gray;   // drive pins with Gray-coded value
+            wave_out <= gray;
     end
 
 endmodule
