@@ -1,17 +1,16 @@
 module square_wave_fourier #(
     parameter PHASE_WIDTH   = 16,
-    parameter PHASE_STEP    = 256,   // adjust for sampling resolution
-    parameter MAX_HARMONICS = 3,     // odd harmonics: 1,3,5,...
-    parameter LUT_BITS      = 12,    // 4096 entries
-    parameter LUT_SIZE      = (1 << LUT_BITS),
-    parameter DEBUG         = 0
+    parameter PHASE_STEP    = 256,
+    parameter MAX_HARMONICS = 5,
+    parameter LUT_BITS      = 12,
+    parameter LUT_SIZE      = (1 << LUT_BITS)
 )(
     input  wire clk,
     input  wire rst,
     output reg  [7:0] wave_out
 );
 
-    // === Fundamental Phase Accumulator ===
+    // === Phase Accumulator ===
     reg [PHASE_WIDTH-1:0] phase;
     always @(posedge clk or posedge rst) begin
         if (rst)
@@ -20,59 +19,89 @@ module square_wave_fourier #(
             phase <= phase + PHASE_STEP;
     end
 
-    // === Sine LUT (bipolar −256..+255) ===
+    // === Sine LUT (synchronous ROM) ===
     reg signed [8:0] sine_lut [0:LUT_SIZE-1];
     initial begin
         $readmemh("sine_lut.hex", sine_lut);
     end
 
-    // === Harmonic Summation ===
-    reg signed [31:0] sum_all;
+    // === Harmonic Pipeline ===
+    reg signed [15:0] scaled_harmonic [0:MAX_HARMONICS-1];
+    reg [PHASE_WIDTH-1:0] phase_n [0:MAX_HARMONICS-1];
+    reg [LUT_BITS-1:0] lut_addr [0:MAX_HARMONICS-1];
+    reg signed [8:0] sine_val [0:MAX_HARMONICS-1];
+
     integer i;
-    integer n;
+    reg [3:0] n;
 
-    reg [PHASE_WIDTH-1:0] phase_n;
-    reg signed [8:0] sine_n;
-    reg signed [15:0] scaled_n;
-
-    always @(*) begin
-        sum_all = 0;
+    always @(posedge clk) begin
         for (i = 0; i < MAX_HARMONICS; i = i + 1) begin
             n = 2*i + 1;
 
-            // Instead of phase * n (DSP), use repeated add for small n
-            case (n)
-                1: phase_n = phase;
-                3: phase_n = phase + phase + phase;
-                5: phase_n = (phase<<2) + phase;   // 4*phase + phase
-                7: phase_n = (phase<<3) - phase;   // 8*phase - phase
-                default: phase_n = phase * n;      // fallback (may use DSP)
-            endcase
+            // Phase multiplication via shift-add
+            if (n == 1)
+                phase_n[i] <= phase;
+            else if (n == 3)
+                phase_n[i] <= phase + phase + phase;
+            else if (n == 5)
+                phase_n[i] <= (phase << 2) + phase;
+            else if (n == 7)
+                phase_n[i] <= (phase << 3) - phase;
+            else
+                phase_n[i] <= phase;
 
-            sine_n = sine_lut[phase_n[PHASE_WIDTH-1 -: LUT_BITS]];
+            // LUT address and read
+            lut_addr[i] <= phase_n[i][PHASE_WIDTH-1 -: LUT_BITS];
+            sine_val[i] <= sine_lut[lut_addr[i]];
 
-            // Replace division by n with precomputed reciprocal constants
-            // Example: scale by (4/pi)*(1/n) approximated as shift-add
-            case (n)
-                1: scaled_n = sine_n;                        // *1
-                3: scaled_n = (sine_n>>>2) + (sine_n>>>4);   // ~1/3 approx
-                5: scaled_n = (sine_n>>>3) + (sine_n>>>5);   // ~1/5 approx
-                7: scaled_n = (sine_n>>>3) - (sine_n>>>6);   // ~1/7 approx
-                default: scaled_n = sine_n / n;              // fallback
-            endcase
-
-            sum_all = sum_all + scaled_n;
+            // Scale harmonic
+            if (n == 1)
+                scaled_harmonic[i] <= sine_val[i];
+            else if (n == 3)
+                scaled_harmonic[i] <= (sine_val[i] >>> 2) + (sine_val[i] >>> 4);
+            else if (n == 5)
+                scaled_harmonic[i] <= (sine_val[i] >>> 3) + (sine_val[i] >>> 5);
+            else if (n == 7)
+                scaled_harmonic[i] <= (sine_val[i] >>> 3) - (sine_val[i] >>> 6);
+            else
+                scaled_harmonic[i] <= sine_val[i];
         end
     end
 
-    // === Output Normalization ===
-    wire signed [31:0] scaled_sum = (sum_all * 100) >>> 9; // replace /638 with shift
-    wire signed [31:0] recentered = scaled_sum + 32'sd120;
+    // === Registered Summation ===
+    reg signed [31:0] sum_all;
+    always @(posedge clk or posedge rst) begin
+        if (rst)
+            sum_all <= 0;
+        else begin
+            sum_all <= 0;
+            for (i = 0; i < MAX_HARMONICS; i = i + 1)
+                sum_all <= sum_all + scaled_harmonic[i];
+        end
+    end
 
-    // Saturating clip to 8-bit unsigned output
-    wire [7:0] final_wave;
-    assign final_wave = (recentered < 0)   ? 8'd0   :
-                        (recentered > 255) ? 8'd255 : recentered[7:0];
+    // === Normalize and Clip ===
+    reg signed [31:0] scaled_sum;
+    reg signed [31:0] recentered;
+    reg [7:0] final_wave;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            scaled_sum <= 0;
+            recentered <= 0;
+            final_wave <= 8'd128;
+        end else begin
+            scaled_sum <= (sum_all * 100) >>> 9;
+            recentered <= scaled_sum + 32'sd120;
+
+            if (recentered < 0)
+                final_wave <= 8'd0;
+            else if (recentered > 255)
+                final_wave <= 8'd255;
+            else
+                final_wave <= recentered[7:0];
+        end
+    end
 
     // === Gray Encoding ===
     wire [7:0] gray;
