@@ -7,23 +7,12 @@ X_ZOOM = 500
 Y_MARGIN = 5
 SKIP_CYCLES = 20  # number of startup samples to ignore
 
-# === Gray to Binary decoding ===
-def gray_to_bin(g):
-    b = 0
-    while g:
-        b ^= g
-        g >>= 1
-    return b
-
-# Load Verilog output as unsigned 8-bit Gray-coded values
+# Load Verilog output as unsigned 8-bit binary values
 with open("verilog_wave.txt") as f:
-    raw_gray = [int(line.strip()) for line in f if line.strip().isdigit()]
-gray = np.array(raw_gray, dtype=np.uint8)
+    raw_binary = [int(line.strip()) for line in f if line.strip().isdigit()]
+binary = np.array(raw_binary, dtype=np.uint8)
 
-# Decode Gray to binary
-binary = np.array([gray_to_bin(v) for v in gray], dtype=np.uint8)
-
-# Explicit bipolar conversion: 0–255 → −128..+127
+# Convert to bipolar: 0–255 → −128..+127
 verilog_wave_full = binary.astype(np.int16) - 128
 
 # Skip startup transients
@@ -51,7 +40,7 @@ ymin, ymax = verilog_wave.min(), verilog_wave.max()
 ax.set_ylim(int(ymin) - Y_MARGIN, int(ymax) + Y_MARGIN)
 
 # Labels and grid
-ax.set_title("Verilog Waveform (Bipolar, Gray Decoded)")
+ax.set_title("Verilog Waveform (Bipolar, Binary Output)")
 ax.set_xlabel("Cycle")
 ax.set_ylabel("Amplitude")
 ax.legend()
@@ -59,5 +48,5 @@ ax.grid(True, linestyle=":", alpha=0.5)
 
 # Save and show
 plt.tight_layout()
-plt.savefig("verilog_waveform_gray_decoded.png", dpi=150)
+plt.savefig("verilog_waveform_binary.png", dpi=150)
 plt.show()
