@@ -1,9 +1,9 @@
 module square_wave_fourier #(
     parameter PHASE_WIDTH   = 16,
-    parameter PHASE_STEP    = 256,   // tune fundamental frequency
-    parameter MAX_HARMONICS = 1,     // odd harmonics: 1,3,5,7 supported by cases below
-    parameter LUT_BITS      = 12,    // 4096-entry sine
-    parameter LUT_SIZE      = (1 << LUT_BITS)
+    parameter PHASE_STEP    = 256,    // fundamental phase step
+    parameter LUT_BITS      = 12,     // 4096-entry sine
+    parameter LUT_SIZE      = (1 << LUT_BITS),
+    parameter MAX_HARMONICS = 8       // odd harmonics: 1..15
 )(
     input  wire clk,
     input  wire rst,
@@ -11,38 +11,59 @@ module square_wave_fourier #(
 );
 
     // =========================================
-    // Declarations 
+    // Declarations
     // =========================================
-    reg [PHASE_WIDTH-1:0] phase;
+    reg [PHASE_WIDTH-1:0] phase0;
 
-    // Sine LUT (signed 9-bit, -256..+255)
-    reg signed [8:0] sine_lut [0:LUT_SIZE-1];
+    reg [PHASE_WIDTH-1:0] phase_h_s1   [0:MAX_HARMONICS-1];
+    reg [PHASE_WIDTH-1:0] step_h       [0:MAX_HARMONICS-1];
+    reg                   harm_en      [0:MAX_HARMONICS-1]; // auto Nyquist gating
 
-    // Pipeline arrays per harmonic
-    reg [PHASE_WIDTH-1:0] phase_h_s1   [0:MAX_HARMONICS-1]; // Stage 1: phase*harmonic
-    reg [LUT_BITS-1:0]    lut_addr_s2  [0:MAX_HARMONICS-1]; // Stage 2: LUT addr
-    reg signed [8:0]      sine_val_s3  [0:MAX_HARMONICS-1]; // Stage 3: ROM data
-    reg signed [15:0]     scaled_s4    [0:MAX_HARMONICS-1]; // Stage 4: scaled harmonic
+    reg  signed [8:0] sine_lut [0:LUT_SIZE-1];
 
-    // Summation
-    reg signed [31:0] sum_c_s5;   // combinational
-    reg signed [31:0] sum_s5;     // registered
+    reg [LUT_BITS-1:0]    lut_addr_s2  [0:MAX_HARMONICS-1];
+    reg signed [8:0]      sine_val_s3  [0:MAX_HARMONICS-1];
+    reg signed [15:0]     scaled_s4    [0:MAX_HARMONICS-1];
 
-    // Normalize/clip
+    reg signed [31:0] sum_c_s5;
+    reg signed [31:0] sum_s5;
     reg signed [31:0] scaled_sum_s6;
     reg signed [31:0] recentered_s6;
     reg [7:0]         final_wave_s6;
 
-    // Loop counters and temps
     integer i;
     integer j;
-    integer n; // current harmonic number (odd: 1,3,5,7)
+    integer n;
 
     // =========================================
     // Initialization
     // =========================================
     initial begin
-        $readmemh("sine_lut.hex", sine_lut); // ensure tool includes as memory init file
+        $readmemh("sine_lut.hex", sine_lut);
+    end
+
+    // Precompute step_h and harmonic enable with Nyquist guard:
+    // n*PHASE_STEP < 2^(PHASE_WIDTH-1)
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            for (i = 0; i < MAX_HARMONICS; i = i + 1) begin
+                n = (2*i) + 1;
+                // shift-add n*PHASE_STEP
+                case (n)
+                    1:  step_h[i] <= PHASE_STEP;
+                    3:  step_h[i] <= PHASE_STEP + PHASE_STEP + PHASE_STEP;
+                    5:  step_h[i] <= (PHASE_STEP << 2) + PHASE_STEP;
+                    7:  step_h[i] <= (PHASE_STEP << 3) - PHASE_STEP;
+                    9:  step_h[i] <= (PHASE_STEP << 3) + PHASE_STEP;
+                    11: step_h[i] <= (PHASE_STEP << 3) + (PHASE_STEP << 1) + PHASE_STEP;
+                    13: step_h[i] <= (PHASE_STEP << 3) + (PHASE_STEP << 2) + PHASE_STEP;
+                    15: step_h[i] <= (PHASE_STEP << 4) - PHASE_STEP;
+                    default: step_h[i] <= PHASE_STEP;
+                endcase
+                // Nyquist enable
+                harm_en[i] <= (step_h[i] < (1 << (PHASE_WIDTH-1)));
+            end
+        end
     end
 
     // =========================================
@@ -50,36 +71,26 @@ module square_wave_fourier #(
     // =========================================
     always @(posedge clk or posedge rst) begin
         if (rst)
-            phase <= {PHASE_WIDTH{1'b0}};
+            phase0 <= {PHASE_WIDTH{1'b0}};
         else
-            phase <= phase + PHASE_STEP;
+            phase0 <= phase0 + PHASE_STEP;
     end
 
     // =========================================
-    // Stage 1: phase multiply for odd harmonics (DSP-free)
-    // Supports n = 1,3,5,7 via shift-add
+    // Stage 1: per-harmonic phase accumulators (gated)
     // =========================================
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             for (i = 0; i < MAX_HARMONICS; i = i + 1)
                 phase_h_s1[i] <= {PHASE_WIDTH{1'b0}};
         end else begin
-            for (i = 0; i < MAX_HARMONICS; i = i + 1) begin
-                n = (2*i) + 1;
-                case (n)
-                    1: phase_h_s1[i] <= phase;
-                    3: phase_h_s1[i] <= phase + phase + phase;
-                    5: phase_h_s1[i] <= (phase << 2) + phase;     // 4*phase + phase
-                    7: phase_h_s1[i] <= (phase << 3) - phase;     // 8*phase - phase
-                    default: phase_h_s1[i] <= phase;              // fallback
-                endcase
-            end
+            for (i = 0; i < MAX_HARMONICS; i = i + 1)
+                phase_h_s1[i] <= harm_en[i] ? (phase_h_s1[i] + step_h[i]) : phase_h_s1[i];
         end
     end
 
     // =========================================
-    // Stage 2: LUT address (MSBs of phase_h)
-    // Replace SystemVerilog -: with explicit range
+    // Stage 2: LUT address
     // =========================================
     always @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -92,7 +103,7 @@ module square_wave_fourier #(
     end
 
     // =========================================
-    // Stage 3: synchronous ROM read (1-cycle latency)
+    // Stage 3: ROM read
     // =========================================
     always @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -100,13 +111,12 @@ module square_wave_fourier #(
                 sine_val_s3[i] <= 9'sd0;
         end else begin
             for (i = 0; i < MAX_HARMONICS; i = i + 1)
-                sine_val_s3[i] <= sine_lut[lut_addr_s2[i]];
+                sine_val_s3[i] <= harm_en[i] ? sine_lut[lut_addr_s2[i]] : 9'sd0;
         end
     end
 
     // =========================================
-    // Stage 4: scale by ~1/n (fixed-point shift approximations)
-    // 1/3 ≈ 1/4 + 1/16, 1/5 ≈ 1/8 + 1/32, 1/7 ≈ 1/8 − 1/64
+    // Stage 4: ~1/n scaling (shift-add)
     // =========================================
     always @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -114,23 +124,30 @@ module square_wave_fourier #(
                 scaled_s4[i] <= 16'sd0;
         end else begin
             for (i = 0; i < MAX_HARMONICS; i = i + 1) begin
-                n = (2*i) + 1;
-                case (n)
-                    1: scaled_s4[i] <= sine_val_s3[i];                                   // 1
-                    3: scaled_s4[i] <= (sine_val_s3[i] >>> 2) + (sine_val_s3[i] >>> 4);  // ~1/3
-                    5: scaled_s4[i] <= (sine_val_s3[i] >>> 3) + (sine_val_s3[i] >>> 5);  // ~1/5
-                    7: scaled_s4[i] <= (sine_val_s3[i] >>> 3) - (sine_val_s3[i] >>> 6);  // ~1/7
-                    default: scaled_s4[i] <= sine_val_s3[i];
-                endcase
+                if (!harm_en[i]) begin
+                    scaled_s4[i] <= 16'sd0;
+                end else begin
+                    n = (2*i) + 1;
+                    case (n)
+                        1:  scaled_s4[i] <= sine_val_s3[i];
+                        3:  scaled_s4[i] <= (sine_val_s3[i] >>> 2) + (sine_val_s3[i] >>> 4);
+                        5:  scaled_s4[i] <= (sine_val_s3[i] >>> 3) + (sine_val_s3[i] >>> 5);
+                        7:  scaled_s4[i] <= (sine_val_s3[i] >>> 3) - (sine_val_s3[i] >>> 6);
+                        9:  scaled_s4[i] <= (sine_val_s3[i] >>> 3) - (sine_val_s3[i] >>> 6) + (sine_val_s3[i] >>> 9);
+                        11: scaled_s4[i] <= (sine_val_s3[i] >>> 4) + (sine_val_s3[i] >>> 5) - (sine_val_s3[i] >>> 8);
+                        13: scaled_s4[i] <= (sine_val_s3[i] >>> 4) + (sine_val_s3[i] >>> 6) - (sine_val_s3[i] >>> 9);
+                        15: scaled_s4[i] <= (sine_val_s3[i] >>> 4) + (sine_val_s3[i] >>> 8);
+                        default: scaled_s4[i] <= sine_val_s3[i];
+                    endcase
+                end
             end
         end
     end
 
     // =========================================
-    // Stage 5: combinational sum (then register)
+    // Stage 5: sum
     // =========================================
     always @* begin
-        // Verilog-2001: acc declared at module scope is cleaner; here we inline via sum_c_s5
         sum_c_s5 = 32'sd0;
         for (j = 0; j < MAX_HARMONICS; j = j + 1)
             sum_c_s5 = sum_c_s5 + scaled_s4[j];
@@ -144,8 +161,7 @@ module square_wave_fourier #(
     end
 
     // =========================================
-    // Stage 6: normalize, recenter, clip (binary output)
-    // Keep conservative amplitude; adjust constants as needed
+    // Stage 6: normalize, recenter, clip
     // =========================================
     always @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -153,12 +169,8 @@ module square_wave_fourier #(
             recentered_s6 <= 32'sd0;
             final_wave_s6 <= 8'd128;
         end else begin
-            // ~*100/512 via arithmetic shift (avoids divider)
-            scaled_sum_s6 <= (sum_s5 * 32'sd100) >>> 9;
-            // DC offset (tune for your DAC mid-scale)
-            recentered_s6 <= scaled_sum_s6 + 32'sd120;
-
-            // Saturating clip to 8-bit unsigned
+            scaled_sum_s6 <= (sum_s5 * 32'sd64) >>> 8; // conservative gain
+            recentered_s6 <= scaled_sum_s6 + 32'sd128; // mid-scale
             if (recentered_s6 < 32'sd0)
                 final_wave_s6 <= 8'd0;
             else if (recentered_s6 > 32'sd255)
@@ -169,11 +181,11 @@ module square_wave_fourier #(
     end
 
     // =========================================
-    // Stage 7: output register (binary for DAC/R–2R)
+    // Stage 7: output register
     // =========================================
     always @(posedge clk or posedge rst) begin
         if (rst)
-            wave_out <= 8'd0; // or 8'd128 for mid-level at reset
+            wave_out <= 8'd128;
         else
             wave_out <= final_wave_s6;
     end
